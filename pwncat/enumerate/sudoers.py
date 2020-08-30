@@ -13,11 +13,12 @@ provides = "sudo"
 per_user = True
 sudo_pattern = re.compile(
     r"""(%?[a-zA-Z][a-zA-Z0-9_]*)\s+([a-zA-Z_][-a-zA-Z0-9_.]*)\s*="""
-    r"""(\([a-zA-Z_][-a-zA-Z0-9_]*(:[a-zA-Z_][a-zA-Z0-9_]*)?\)|[a-zA-Z_]"""
+    r"""(\([a-zA-Z_][-a-zA-Z0-9_]*(:[a-zA-Z_][a-zA-Z0-9_]*)?(,\ *!?[a-zA-Z_][-a-zA-Z0-9_]*(:[a-zA-Z_][a-zA-Z0-9_]*)?)*\)|[a-zA-Z_]"""
     r"""[a-zA-Z0-9_]*)?\s+((NOPASSWD:\s+)|(SETENV:\s+)|(sha[0-9]{1,3}:"""
     r"""[-a-zA-Z0-9_]+\s+))*(.*)"""
 )
 
+directives = ["Defaults", "User_Alias", "Runas_Alias", "Host_Alias", "Cmnd_Alias"]
 
 @dataclasses.dataclass
 class SudoSpec(FactData):
@@ -84,6 +85,64 @@ class SudoSpec(FactData):
         return None
 
 
+def LineParser(line):
+    match = sudo_pattern.search(line)
+
+    if match is None:
+        return SudoSpec(line, matched=False, options=[])
+
+    user = match.group(1)
+
+    if user in directives:
+        return SudoSpec(line, matched=False, options=[])
+
+    if user.startswith("%"):
+        group = user.lstrip("%")
+        user = None
+    else:
+        group = None
+
+    host = match.group(2)
+
+    if match.group(3) is not None:
+        runas_user = match.group(3).lstrip("(").rstrip(")")
+        if match.group(4) is not None:
+            runas_group = match.group(4)
+            runas_user = runas_user.split(":")[0]
+        else:
+            runas_group = None
+        if runas_user == "":
+            runas_user = "root"
+    else:
+        runas_user = "root"
+        runas_group = None
+
+    options = []
+    hash = None
+
+    for g in map(match.group, [8, 9, 10]):
+        if g is None:
+            continue
+
+        options.append(g.strip().rstrip(":"))
+        if g.startswith("sha"):
+            hash = g
+
+    command = match.group(11)
+
+    return SudoSpec(
+        line,
+        True,
+        user,
+        group,
+        host,
+        runas_user,
+        runas_group,
+        options,
+        hash,
+        command,
+    )
+
 def enumerate() -> Generator[FactData, None, None]:
     """
     Enumerate sudo privileges for the current user. If able, this will
@@ -94,8 +153,6 @@ def enumerate() -> Generator[FactData, None, None]:
     :return:
     """
 
-    directives = ["Defaults", "User_Alias", "Runas_Alias", "Host_Alias", "Cmnd_Alias"]
-
     try:
         with pwncat.victim.open("/etc/sudoers", "r") as filp:
             for line in filp:
@@ -104,63 +161,7 @@ def enumerate() -> Generator[FactData, None, None]:
                 if line.startswith("#") or line == "":
                     continue
 
-                match = sudo_pattern.search(line)
-                if match is None:
-                    yield SudoSpec(line, matched=False, options=[])
-                    continue
-
-                user = match.group(1)
-
-                if user in directives:
-                    yield SudoSpec(line, matched=False, options=[])
-                    continue
-
-                if user.startswith("%"):
-                    group = user.lstrip("%")
-                    user = None
-                else:
-                    group = None
-
-                host = match.group(2)
-
-                if match.group(3) is not None:
-                    runas_user = match.group(3).lstrip("(").rstrip(")")
-                    if match.group(4) is not None:
-                        runas_group = match.group(4)
-                        runas_user = runas_user.split(":")[0]
-                    else:
-                        runas_group = None
-                    if runas_user == "":
-                        runas_user = "root"
-                else:
-                    runas_user = "root"
-                    runas_group = None
-
-                options = []
-                hash = None
-
-                for g in map(match.group, [6, 7, 8]):
-                    if g is None:
-                        continue
-
-                    options.append(g.strip().rstrip(":"))
-                    if g.startswith("sha"):
-                        hash = g
-
-                command = match.group(9)
-
-                yield SudoSpec(
-                    line,
-                    True,
-                    user,
-                    group,
-                    host,
-                    runas_user,
-                    runas_group,
-                    options,
-                    hash,
-                    command,
-                )
+                yield LineParser(line)
 
         # No need to parse `sudo -l`, since can read /etc/sudoers
         return
@@ -189,61 +190,4 @@ def enumerate() -> Generator[FactData, None, None]:
 
         # Build the beginning part of a normal spec
         line = f"{pwncat.victim.current_user.name} local=" + line.strip()
-
-        match = sudo_pattern.search(line)
-        if match is None:
-            yield SudoSpec(line, matched=False, options=[])
-            continue
-
-        user = match.group(1)
-
-        if user in directives:
-            yield SudoSpec(line, matched=False, options=[])
-            continue
-
-        if user.startswith("%"):
-            group = user.lstrip("%")
-            user = None
-        else:
-            group = None
-
-        host = match.group(2)
-
-        if match.group(3) is not None:
-            runas_user = match.group(3).lstrip("(").rstrip(")")
-            if match.group(4) is not None:
-                runas_group = match.group(4)
-                runas_user = runas_user.split(":")[0]
-            else:
-                runas_group = None
-            if runas_user == "":
-                runas_user = "root"
-        else:
-            runas_user = "root"
-            runas_group = None
-
-        options = []
-        hash = None
-
-        for g in map(match.group, [6, 7, 8]):
-            if g is None:
-                continue
-
-            options.append(g.strip().rstrip(":"))
-            if g.startswith("sha"):
-                hash = g
-
-        command = match.group(9)
-
-        yield SudoSpec(
-            line,
-            True,
-            user,
-            group,
-            host,
-            runas_user,
-            runas_group,
-            options,
-            hash,
-            command,
-        )
+        yield LineParser(line)

